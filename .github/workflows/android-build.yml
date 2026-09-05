@@ -1,0 +1,135 @@
+# 构建 Orange Cloud 安卓 APK（oss 风味，按 ABI 拆包：armv7 / armv8 两个独立 APK）
+#
+# 用法：
+#   - 手动触发（Actions → Run workflow）默认构建 oss release，产物在 artifact 里；
+#   - push / PR 改动 apps/android 或本文件时自动构建；
+#   - 正式签名：在仓库 Settings → Secrets and variables → Actions 配置以下 Secret：
+#       ANDROID_KEYSTORE_BASE64   # 上传密钥库 base64（base64 -w0 upload-keystore.jks）
+#       ANDROID_KEYSTORE_PASSWORD # storePassword
+#       ANDROID_KEY_ALIAS         # keyAlias
+#       ANDROID_KEY_PASSWORD      # keyPassword
+#     未配置时自动改用 debug 密钥签名，产物仍可直接安装（标识为 *-debugsigned）；
+#     换 flavor（play/direct）只需改下方 FLAVOR 与任务名。
+name: Android Build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'apps/android/**'
+      - '.github/workflows/android-build.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'apps/android/**'
+      - '.github/workflows/android-build.yml'
+
+concurrency:
+  group: android-build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  FLAVOR: oss
+  BUILD_TASK: assembleOssRelease
+
+jobs:
+  build-apk:
+    name: Build oss APK (armv7 + armv8)
+    runs-on: ubuntu-latest
+    env:
+      KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Set up Android SDK (accept licenses; AGP auto-installs platform/build-tools)
+        uses: android-actions/setup-android@v3
+
+      - name: Configure release signing (optional; skipped when no secrets)
+        if: env.KEYSTORE_BASE64 != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "$KEYSTORE_BASE64" | base64 -d > upload-keystore.jks
+          cat > keystore.properties <<EOF
+          storeFile=upload-keystore.jks
+          storePassword=$KEYSTORE_PASSWORD
+          keyAlias=$KEY_ALIAS
+          keyPassword=$KEY_PASSWORD
+          EOF
+        working-directory: apps/android
+
+      # 仓库的 gradle-daemon-jvm.properties 声明了 JetBrains JDK 21 守护进程工具链
+      # （开发者本机 Android Studio 用）；CI 直接跑 README 要求的标准 JDK 17，
+      # 移除该文件避免额外下载一套 JBR 并省下守护进程切换时间。
+      - name: "Build release APKs (ABI splits: armeabi-v7a + arm64-v8a)"
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f gradle-daemon-jvm.properties
+          ./gradlew :app:${BUILD_TASK}
+        working-directory: apps/android
+
+      - name: Debug-sign fallback (installable) when no keystore secrets
+        if: env.KEYSTORE_BASE64 == ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          APKSIGNER="$(find "${ANDROID_HOME}/build-tools" -name apksigner -type f | sort | tail -1)"
+          test -n "$APKSIGNER" || { echo "apksigner not found under ${ANDROID_HOME}/build-tools" >&2; exit 1; }
+          KEYSTORE="$HOME/.android/debug.keystore"
+          if [ ! -f "$KEYSTORE" ]; then
+            mkdir -p "$(dirname "$KEYSTORE")"
+            keytool -genkeypair -v -keystore "$KEYSTORE" -storepass android -keypass android \
+              -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          fi
+          for apk in app/build/outputs/apk/${FLAVOR}/release/*.apk; do
+            "$APKSIGNER" sign --ks "$KEYSTORE" --ks-pass pass:android \
+              --key-pass pass:android --ks-key-alias androiddebugkey \
+              --out "${apk}.tmp" "$apk"
+            mv -f "${apk}.tmp" "$apk"
+            echo "debug-signed: $apk"
+          done
+        working-directory: apps/android
+
+      - name: Collect APKs (rename with ABI + version, print digests)
+        shell: bash
+        run: |
+          set -euo pipefail
+          VER="$(sed -n 's/^[[:space:]]*versionName = "\([^"]*\)".*/\1/p' app/build.gradle.kts | head -1)"
+          mkdir -p dist
+          for apk in app/build/outputs/apk/${FLAVOR}/release/*.apk; do
+            abi="$(basename "$apk" | sed -E "s/^app-${FLAVOR}-(arm64-v8a|armeabi-v7a)-release\.apk$/\1/")"
+            if [ -n "$KEYSTORE_BASE64" ]; then
+              out="dist/OrangeCloud-${VER}-${abi}.apk"
+            else
+              out="dist/OrangeCloud-${VER}-${abi}-debugsigned.apk"
+            fi
+            mv -f "$apk" "$out"
+            echo "== $out ($(du -h "$out" | cut -f1))"
+            sha256sum "$out"
+          done
+        working-directory: apps/android
+
+      - name: Upload APK artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: orange-cloud-oss-apk
+          path: apps/android/dist/*.apk
+          if-no-files-found: error
+          retention-days: 30

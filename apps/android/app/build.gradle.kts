@@ -121,6 +121,17 @@ android {
         }
     }
 
+    // 按 ABI 拆包：只产出 armeabi-v7a（armv7）与 arm64-v8a（armv8）两个 APK，不产 universal 包。
+    // 纯 Kotlin/Compose 应用无原生库，拆包主要服务于渠道分发（体积与按机型下发）。
+    splits {
+        abi {
+            isEnable = true
+            reset()
+            include("armeabi-v7a", "arm64-v8a")
+            isUniversalApk = false
+        }
+    }
+
     buildFeatures {
         compose = true
         buildConfig = true
