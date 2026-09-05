@@ -58,6 +58,12 @@ android {
             "\"${buildProp("OAUTH_REDIRECT_URI", "https://o-c.do/oauth/callback")}\"",
         )
 
+        // 授权请求是否追加 offline_access（申请 refresh token）：
+        // 官方 Client 必须带，否则拿不到 refresh token（见 AuthRepository 注释，issue #44）；
+        // 第三方自建 Client（/accounts/{id}/oauth_clients）无法注册 offline_access，
+        // Hydra 会以 invalid_scope 拒绝整个授权，故 oss 风味在 flavor 层默认关闭。
+        buildConfigField("boolean", "OAUTH_OFFLINE_ACCESS", "\"${buildProp("OAUTH_OFFLINE_ACCESS", "true")}\"")
+
         // FCM（推送）：4 项来自 Firebase 项目（Web/Android 应用）。空串 = 推送不初始化。
         buildConfigField("String", "FCM_PROJECT_ID", "\"${buildProp("FCM_PROJECT_ID")}\"")
         buildConfigField("String", "FCM_APP_ID", "\"${buildProp("FCM_APP_ID")}\"")
@@ -86,6 +92,10 @@ android {
             buildConfigField("String", "FCM_APP_ID", "\"\"")
             buildConfigField("String", "FCM_API_KEY", "\"\"")
             buildConfigField("String", "FCM_SENDER_ID", "\"\"")
+
+            // 第三方 Client 无 offline_access（Hydra 拒绝未注册 scope）→ 登录期不追加；
+            // 代价：access token 过期后无 refresh，需重新登录。可用 -POAUTH_OFFLINE_ACCESS=true 覆盖。
+            buildConfigField("boolean", "OAUTH_OFFLINE_ACCESS", "\"${buildProp("OAUTH_OFFLINE_ACCESS", "false")}\"")
         }
         // direct：非 Play 中国大陆直发渠道。无 Billing，Pro 走激活码兑换（Web 售卖 + /api/redeem）。
         // 官方构建，用官方 OAuth Client；独立 applicationId 后缀以与 Play 版共存。

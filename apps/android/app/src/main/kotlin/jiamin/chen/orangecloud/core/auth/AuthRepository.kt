@@ -7,6 +7,7 @@ import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import dagger.hilt.android.qualifiers.ApplicationContext
+import jiamin.chen.orangecloud.BuildConfig
 import jiamin.chen.orangecloud.R
 import jiamin.chen.orangecloud.core.di.ApplicationScope
 import jiamin.chen.orangecloud.core.network.AccessTokenProvider
@@ -101,9 +102,13 @@ class AuthRepository @Inject constructor(
         // 2026-06-29 client 轮换后不带它的登录拿不到 refresh token，access token 到期后
         // refreshAccessToken 走 removeSession → 用户被「自动退出账号」（issue #44 楼层反馈）。
         // 与 iOS 1.8.2(26) 同修：在唯一咽喉点统一追加，勿在 UI 层散落。
+        // 注意：第三方自建 Client（/accounts/{id}/oauth_clients）无法注册 offline_access，
+        // 授权时 Hydra 直接 invalid_scope 拒绝——oss 风味经 OAUTH_OFFLINE_ACCESS=false 跳过追加
+        //（代价：无 refresh token，access token 过期后需重新登录）。
         val scopeWithOffline =
-            if (scopeString.split(" ").contains("offline_access")) scopeString
-            else "$scopeString offline_access"
+            if (BuildConfig.OAUTH_OFFLINE_ACCESS && !scopeString.split(" ").contains("offline_access"))
+                "$scopeString offline_access"
+            else scopeString
 
         return Uri.parse(OAuthConfig.AUTHORIZATION_URL).buildUpon()
             .appendQueryParameter("response_type", "code")
