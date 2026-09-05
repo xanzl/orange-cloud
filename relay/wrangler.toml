@@ -1,0 +1,5 @@
+# 自编译 OAuth 回调中转（Cloudflare Workers 单文件版）
+# 用法：cd relay && npx wrangler deploy
+name = "orange-cloud-oauth-relay"
+main = "src/index.js"
+compatibility_date = "2026-01-01"
