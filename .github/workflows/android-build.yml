@@ -9,6 +9,10 @@
 #       ANDROID_KEY_ALIAS         # keyAlias
 #       ANDROID_KEY_PASSWORD      # keyPassword
 #     未配置时自动改用 debug 密钥签名，产物仍可直接安装（标识为 *-debugsigned）；
+#   - 可登录 OAuth（自建中转）：
+#       OAUTH_CLIENT_ID     # 你自己的 Cloudflare OAuth App 的 client id
+#       OAUTH_REDIRECT_URI  # 你自己部署的回调中转地址（https://你的域名/oauth/callback）
+#     两者都配置时，产物 login 可用（你自己的 client + 中转）；缺省 = 不可登录的纯功能包；
 #     换 flavor（play/direct）只需改下方 FLAVOR 与任务名。
 name: Android Build
 
@@ -45,6 +49,8 @@ jobs:
       KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
       KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
       KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+      OAUTH_CLIENT_ID: ${{ secrets.OAUTH_CLIENT_ID }}
+      OAUTH_REDIRECT_URI: ${{ secrets.OAUTH_REDIRECT_URI }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -82,7 +88,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ./gradlew :app:${BUILD_TASK}
+          ./gradlew :app:${BUILD_TASK} \
+            ${OAUTH_CLIENT_ID:+-POAUTH_CLIENT_ID=$OAUTH_CLIENT_ID} \
+            ${OAUTH_REDIRECT_URI:+-POAUTH_REDIRECT_URI=$OAUTH_REDIRECT_URI}
         working-directory: apps/android
 
       - name: Debug-sign fallback (installable) when no keystore secrets

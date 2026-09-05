@@ -50,6 +50,14 @@ android {
         manifestPlaceholders["oauthScheme"] = "orangecloud"
         manifestPlaceholders["oauthHost"] = "oauth"
 
+        // OAuth 回调中转：默认官方 o-c.do（仅官方 Client 开户）；
+        // 自编译者用 -POAUTH_REDIRECT_URI / local.properties 指向自己部署的中转。
+        buildConfigField(
+            "String",
+            "OAUTH_REDIRECT_URI",
+            "\"${buildProp("OAUTH_REDIRECT_URI", "https://o-c.do/oauth/callback")}\"",
+        )
+
         // FCM（推送）：4 项来自 Firebase 项目（Web/Android 应用）。空串 = 推送不初始化。
         buildConfigField("String", "FCM_PROJECT_ID", "\"${buildProp("FCM_PROJECT_ID")}\"")
         buildConfigField("String", "FCM_APP_ID", "\"${buildProp("FCM_APP_ID")}\"")

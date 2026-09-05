@@ -13,7 +13,12 @@ object OAuthConfig {
 
     const val CALLBACK_SCHEME = "orangecloud"
     const val CALLBACK_HOST = "oauth"
-    const val REDIRECT_URI = "https://o-c.do/oauth/callback"
+
+    /**
+     * 回调中转地址。默认官方 o-c.do（仅官方 Client 开户）；
+     * 自编译者可经 -POAUTH_REDIRECT_URI / local.properties 指向自己部署的中转（任意 HTTPS 平台）。
+     */
+    val REDIRECT_URI: String = BuildConfig.OAUTH_REDIRECT_URI
 
     const val AUTHORIZATION_URL = "https://dash.cloudflare.com/oauth2/auth"
     /** 网页登出端点：添加账号时先登出再续跳授权页，避免复用上一个登录态（支持 ?to= 续跳）。 */
