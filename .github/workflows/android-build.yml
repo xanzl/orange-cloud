@@ -49,11 +49,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up JDK 17
+      # gradle-daemon-jvm.properties 声明守护进程工具链为 JetBrains JDK 21
+      # （开发机 Android Studio 一致）；CI 用同款 JBR 21 直接满足，避免守护进程
+      # 另起一套 JVM（守护进程启动阶段 foojay resolver 尚未加载，无法自动下载）。
+      # README 的 JDK 17 是 AGP 最低要求；Gradle 9.5 / AGP 9.3 在 JDK 21 上运行没有问题，
+      # 编译目标仍是 17（compileOptions）。
+      - name: Set up JDK
         uses: actions/setup-java@v4
         with:
-          distribution: temurin
-          java-version: '17'
+          distribution: jetbrains
+          java-version: '21'
           cache: gradle
 
       - name: Set up Android SDK (accept licenses; AGP auto-installs platform/build-tools)
@@ -73,14 +78,10 @@ jobs:
           EOF
         working-directory: apps/android
 
-      # 仓库的 gradle-daemon-jvm.properties 声明了 JetBrains JDK 21 守护进程工具链
-      # （开发者本机 Android Studio 用）；CI 直接跑 README 要求的标准 JDK 17，
-      # 移除该文件避免额外下载一套 JBR 并省下守护进程切换时间。
       - name: "Build release APKs (ABI splits: armeabi-v7a + arm64-v8a)"
         shell: bash
         run: |
           set -euo pipefail
-          rm -f gradle-daemon-jvm.properties
           ./gradlew :app:${BUILD_TASK}
         working-directory: apps/android
 
