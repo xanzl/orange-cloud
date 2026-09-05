@@ -3,3 +3,8 @@
 name = "orange-cloud-oauth-relay"
 main = "src/index.js"
 compatibility_date = "2026-01-01"
+
+# 自定义域（需 xanz.top 在这个 Cloudflare 账号下）
+routes = [
+  { pattern = "oc-api.xanz.top", custom_domain = true },
+]
