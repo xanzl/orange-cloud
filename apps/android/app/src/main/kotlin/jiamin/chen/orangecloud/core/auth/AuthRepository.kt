@@ -13,7 +13,9 @@ import jiamin.chen.orangecloud.core.di.ApplicationScope
 import jiamin.chen.orangecloud.core.network.AccessTokenProvider
 import jiamin.chen.orangecloud.core.network.ApiError
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.firstOrNull
@@ -56,8 +58,23 @@ class AuthRepository @Inject constructor(
     private val _state = MutableStateFlow(AuthState())
     val state: StateFlow<AuthState> = _state.asStateFlow()
 
+    private val _reauthRequests = MutableSharedFlow<Uri>(extraBufferCapacity = 1)
+
+    /** 续期请求事件（URL）：access token 临近过期且会话没有 refresh token 时发出。
+     * 主 Activity 收集后弹授权页（Custom Tab/系统浏览器，复用 CF 登录态），
+     * 回调后由 handleRedirect 以 REAUTH 模式原地替换 token，用户无感续期。 */
+    val reauthRequests: SharedFlow<Uri> = _reauthRequests
+
+    /** 防抖：同一会话的续期请求只发出一次，回调完成或会话移除后复位。 */
+    private var reauthInFlight = false
+
     /** 发起授权到回调之间的 PKCE 上下文（持久化以扛进程被杀） */
-    private data class Pending(val verifier: String, val state: String)
+    private data class Pending(
+        val verifier: String,
+        val state: String,
+        val mode: String = MODE_LOGIN,
+        val sessionId: String? = null,
+    )
 
     init {
         externalScope.launch { loadPersisted() }
@@ -92,11 +109,24 @@ class AuthRepository @Inject constructor(
      * 授权 URL 本身两种场景一致。（`prompt=login` 被 Cloudflare 忽略、Chrome 不给第三方
      * 开无痕标签，实测均无效，勿走回头路。）
      */
-    suspend fun buildAuthorizationUri(scopeString: String): Uri {
+    suspend fun buildAuthorizationUri(scopeString: String): Uri =
+        buildAuthUri(scopeString, Pending(verifier = "", state = "", mode = MODE_LOGIN))
+
+    /**
+     * 续期授权：对既有会话重新走一遍 OAuth 授权，回调后原地替换该会话的 token
+     *（不新增身份、不清登录态）。scope 沿用会话已授予的权限集。
+     * 返回 null 表示会话不存在。
+     */
+    suspend fun reauthenticate(sessionId: String): Uri? {
+        val session = _state.value.sessions.firstOrNull { it.id == sessionId } ?: return null
+        return buildAuthUri(session.scopes.joinToString(" "), Pending(verifier = "", state = "", mode = MODE_REAUTH, sessionId = sessionId))
+    }
+
+    private suspend fun buildAuthUri(scopeString: String, pending: Pending): Uri {
         val verifier = PkceHelper.generateCodeVerifier()
         val challenge = PkceHelper.generateCodeChallenge(verifier)
         val state = UUID.randomUUID().toString()
-        savePending(Pending(verifier, state))
+        savePending(pending.copy(verifier = verifier, state = state))
 
         // CF dash OAuth（Hydra 系）只在请求 offline_access 时才签发 refresh token；
         // 2026-06-29 client 轮换后不带它的登录拿不到 refresh token，access token 到期后
@@ -121,13 +151,15 @@ class AuthRepository @Inject constructor(
             .build()
     }
 
-    /** 处理 orangecloud://oauth/callback：验 state → 换 token → 新增身份并切到它。 */
+    /** 处理 orangecloud://oauth/callback：验 state → 换 token → 新增身份（或 REAUTH 续期时原地替换）。 */
     suspend fun handleRedirect(uri: Uri): Result<Unit> {
         val result = runCatching { performRedirect(uri) }
         result.exceptionOrNull()?.let { e ->
             val reason = (e as? OAuthRedirectException)?.reason ?: e.message ?: "error"
             _state.value = _state.value.copy(redirectError = reason)
         }
+        // 无论成功失败都复位防抖，允许后续窗口再次发起续期
+        reauthInFlight = false
         return result
     }
 
@@ -139,13 +171,25 @@ class AuthRepository @Inject constructor(
         if (state != pending.state) throw OAuthRedirectException("state_mismatch")
 
         val token = exchangeCode(code, pending.verifier)
-        val id = UUID.randomUUID().toString()
-        tokenStore.save(id, token)
         val scopes = token.scope.split(" ").filter { it.isNotEmpty() }.sorted()
-        val label = oauthApi.fetchUserInfo(token.accessToken)?.let { it.email ?: it.name }
-            ?: context.getString(R.string.default_account_label, _state.value.sessions.size + 1)
-        val sessions = _state.value.sessions + AuthSessionMeta(id, label, scopes)
-        _state.value = _state.value.copy(sessions = sessions, currentSessionId = id, redirectError = null)
+        val reauthSessionId = pending.sessionId
+        if (pending.mode == MODE_REAUTH && reauthSessionId != null &&
+            _state.value.sessions.any { it.id == reauthSessionId }
+        ) {
+            // 续期：原地替换旧会话的 token（身份 / 标签 / 登录态不动）
+            tokenStore.save(reauthSessionId, token)
+            val sessions = _state.value.sessions.map {
+                if (it.id == reauthSessionId) it.copy(scopes = scopes) else it
+            }
+            _state.value = _state.value.copy(sessions = sessions, redirectError = null)
+        } else {
+            val id = UUID.randomUUID().toString()
+            tokenStore.save(id, token)
+            val label = oauthApi.fetchUserInfo(token.accessToken)?.let { it.email ?: it.name }
+                ?: context.getString(R.string.default_account_label, _state.value.sessions.size + 1)
+            val sessions = _state.value.sessions + AuthSessionMeta(id, label, scopes)
+            _state.value = _state.value.copy(sessions = sessions, currentSessionId = id, redirectError = null)
+        }
         persist()
         clearPending()
     }
@@ -167,7 +211,30 @@ class AuthRepository @Inject constructor(
         val sessionId = _state.value.currentSessionId ?: throw ApiError.Unauthorized
         val token = tokenStore.load(sessionId) ?: throw ApiError.Unauthorized
         val secondsLeft = token.expiresAtEpochSeconds - nowSeconds()
-        return if (secondsLeft < 60) refreshAccessToken() else token.accessToken
+        return when {
+            secondsLeft < 60 -> refreshAccessToken()
+            // 第三方 client 没有 refresh token：临近过期提前发起自动续期（弹授权页换新 token），
+            // 续期完成前旧 token 仍可用，用户无感；被忽略则到期走 refreshAccessToken 的兜底登出。
+            secondsLeft < REAUTH_LEAD_SECONDS && token.refreshToken == null -> {
+                requestReauth(sessionId)
+                token.accessToken
+            }
+            else -> token.accessToken
+        }
+    }
+
+    /** 发起一次续期授权（防抖：同一轮只发一次，回调完成或会话移除后复位）。 */
+    private fun requestReauth(sessionId: String) {
+        if (reauthInFlight) return
+        reauthInFlight = true
+        externalScope.launch {
+            val uri = reauthenticate(sessionId)
+            if (uri != null) {
+                _reauthRequests.emit(uri)
+            } else {
+                reauthInFlight = false
+            }
+        }
     }
 
     override suspend fun refreshAccessToken(): String {
@@ -233,6 +300,7 @@ class AuthRepository @Inject constructor(
         val current = if (_state.value.currentSessionId == id) sessions.firstOrNull()?.id
         else _state.value.currentSessionId
         _state.value = _state.value.copy(sessions = sessions, currentSessionId = current)
+        reauthInFlight = false
         persist()
     }
 
@@ -250,6 +318,9 @@ class AuthRepository @Inject constructor(
         dataStore.edit {
             it[KEY_PENDING_VERIFIER] = pending.verifier
             it[KEY_PENDING_STATE] = pending.state
+            it[KEY_PENDING_MODE] = pending.mode
+            pending.sessionId?.let { id -> it[KEY_PENDING_SESSION_ID] = id }
+                ?: it.remove(KEY_PENDING_SESSION_ID)
         }
     }
 
@@ -257,23 +328,39 @@ class AuthRepository @Inject constructor(
         val prefs = dataStore.data.firstOrNull() ?: return null
         val v = prefs[KEY_PENDING_VERIFIER] ?: return null
         val s = prefs[KEY_PENDING_STATE] ?: return null
-        return Pending(v, s)
+        return Pending(
+            verifier = v,
+            state = s,
+            mode = prefs[KEY_PENDING_MODE] ?: MODE_LOGIN,
+            sessionId = prefs[KEY_PENDING_SESSION_ID],
+        )
     }
 
     private suspend fun clearPending() {
         dataStore.edit {
             it.remove(KEY_PENDING_VERIFIER)
             it.remove(KEY_PENDING_STATE)
+            it.remove(KEY_PENDING_MODE)
+            it.remove(KEY_PENDING_SESSION_ID)
         }
     }
 
     private fun nowSeconds(): Long = System.currentTimeMillis() / 1000
 
     companion object {
+        /** 普通登录授权 */
+        private const val MODE_LOGIN = "login"
+        /** 续期授权（回调后原地替换既有会话的 token） */
+        private const val MODE_REAUTH = "reauth"
+        /** 距过期还有多少秒时提前发起续期（5 分钟） */
+        private const val REAUTH_LEAD_SECONDS = 300L
+
         private val KEY_SESSIONS = stringPreferencesKey("auth_sessions")
         private val KEY_CURRENT = stringPreferencesKey("auth_current_session")
         private val KEY_PENDING_VERIFIER = stringPreferencesKey("auth_pending_verifier")
         private val KEY_PENDING_STATE = stringPreferencesKey("auth_pending_state")
+        private val KEY_PENDING_MODE = stringPreferencesKey("auth_pending_mode")
+        private val KEY_PENDING_SESSION_ID = stringPreferencesKey("auth_pending_session_id")
     }
 }
 

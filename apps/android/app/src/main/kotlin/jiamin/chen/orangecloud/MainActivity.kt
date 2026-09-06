@@ -21,6 +21,7 @@ import jiamin.chen.orangecloud.core.purchase.BillingGateway
 import jiamin.chen.orangecloud.core.purchase.RedeemOutcome
 import jiamin.chen.orangecloud.core.system.AppAppearance
 import jiamin.chen.orangecloud.core.system.AppPrefs
+import jiamin.chen.orangecloud.core.util.launchCustomTab
 import jiamin.chen.orangecloud.ui.root.OrangeCloudRoot
 import kotlinx.coroutines.launch
 import javax.inject.Inject
@@ -43,6 +44,11 @@ class MainActivity : ComponentActivity() {
         billingGateway.connect()
         handleOAuthRedirect(intent)
         handleRedeemRedirect(intent)
+        // 第三方 client 无 refresh token：token 临近过期时 AuthRepository 发出续期事件，
+        // 用 Custom Tab 打开授权页（复用系统浏览器里的 CF 登录态），回调后原地换新 token。
+        lifecycleScope.launch {
+            authRepository.reauthRequests.collect { uri -> launchCustomTab(uri, ephemeral = false) }
+        }
         setContent {
             val appearance by appPrefs.appearance.collectAsStateWithLifecycle(initialValue = AppAppearance.SYSTEM)
             val darkTheme = when (appearance) {
